@@ -1,0 +1,124 @@
+/**
+ * Harness test: drives the tool_call handler with a mocked model registry to
+ * verify allow / deny / fail-closed / circuit-breaker behavior without any
+ * live API. Run: node --experimental-strip-types harness-test.ts
+ */
+import assert from "node:assert/strict";
+import guardianExtension from "./index.ts";
+
+type Handler = (event: unknown, ctx: unknown) => Promise<{ block: boolean; reason?: string } | undefined>;
+
+function makeHarness(completeImpl: () => Promise<string>) {
+	const handlers = new Map<string, Handler>();
+	const fakePi = {
+		on: (name: string, handler: Handler) => handlers.set(name, handler),
+		registerCommand: () => {},
+	};
+	guardianExtension(fakePi as never);
+
+	const model = { id: "mock-model", provider: "mock" };
+	const ctx = {
+		hasUI: false,
+		ui: undefined,
+		model,
+		modelRegistry: {
+			find: () => undefined, // preferred guardian model unavailable -> session fallback
+			hasConfiguredAuth: () => true,
+			complete: async () => ({ content: [{ type: "text", text: await completeImpl() }] }),
+		},
+		sessionManager: {
+			getBranch: () => [
+				{
+					type: "message",
+					message: { role: "user", content: [{ type: "text", text: "please do the thing" }] },
+				},
+			],
+		},
+	};
+
+	const toolCall = handlers.get("tool_call");
+	const beforeAgentStart = handlers.get("before_agent_start");
+	assert.ok(toolCall, "tool_call handler registered");
+	return {
+		review: (input: Record<string, unknown> = { command: "sudo systemctl stop nginx" }) =>
+			toolCall({ toolName: "bash", toolCallId: "t1", input }, ctx),
+		newTurn: () => beforeAgentStart?.({}, ctx),
+	};
+}
+
+// Static gate short-circuits without calling the model.
+{
+	let calls = 0;
+	const h = makeHarness(async () => {
+		calls++;
+		return '{"outcome":"allow"}';
+	});
+	const result = await h.review({ command: "git status" });
+	assert.equal(result, undefined);
+	assert.equal(calls, 0, "safe command must not trigger a review");
+}
+
+// Allow verdict -> tool proceeds.
+{
+	const h = makeHarness(async () => '{"risk_level":"medium","user_authorization":"high","outcome":"allow","rationale":"ok"}');
+	assert.equal(await h.review(), undefined);
+}
+
+// Deny verdict -> block with codex-style reason.
+{
+	const h = makeHarness(async () => '{"risk_level":"high","user_authorization":"low","outcome":"deny","rationale":"not authorized"}');
+	const result = await h.review();
+	assert.ok(result?.block, "deny must block");
+	assert.match(result.reason ?? "", /denied bash \(risk: high, authorization: low\)/);
+	assert.match(result.reason ?? "", /Do not attempt to work around/);
+}
+
+// Model failure -> fail closed (headless: block).
+{
+	const h = makeHarness(async () => {
+		throw new Error("boom");
+	});
+	const result = await h.review();
+	assert.ok(result?.block, "failure must block");
+	assert.match(result.reason ?? "", /fail closed/);
+}
+
+// Unparseable verdict -> fail closed.
+{
+	const h = makeHarness(async () => "sure, go ahead!");
+	const result = await h.review();
+	assert.ok(result?.block, "unparseable verdict must block");
+}
+
+// Circuit breaker: 3 consecutive denials trip it; later reviews skip the model.
+{
+	let calls = 0;
+	const h = makeHarness(async () => {
+		calls++;
+		return '{"risk_level":"high","user_authorization":"unknown","outcome":"deny","rationale":"no"}';
+	});
+	for (let i = 0; i < 3; i++) {
+		const result = await h.review();
+		assert.ok(result?.block);
+	}
+	assert.equal(calls, 3);
+	const afterTrip = await h.review();
+	assert.ok(afterTrip?.block, "breaker active: headless blocks without review");
+	assert.match(afterTrip.reason ?? "", /circuit breaker/);
+	assert.equal(calls, 3, "breaker must skip the model");
+}
+
+// New turn resets the consecutive counter (but a tripped breaker stays tripped).
+{
+	let verdict = '{"outcome":"deny","risk_level":"high","user_authorization":"low","rationale":"no"}';
+	const h = makeHarness(async () => verdict);
+	await h.review();
+	await h.review();
+	await h.newTurn(); // consecutive resets to 0 before the third denial
+	await h.review();
+	verdict = '{"outcome":"allow"}';
+	const result = await h.review();
+	assert.equal(result, undefined, "breaker must not trip on 2+1 denials across turns");
+}
+
+console.log("all harness tests passed");
