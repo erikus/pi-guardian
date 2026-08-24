@@ -10,10 +10,14 @@ risky action against a written policy and allows or denies it automatically.
 ## Usage
 
 ```bash
-pi -e /home/estaab/code/pi-guardian/index.ts
+pi install git:github.com/erikus/pi-guardian
 ```
 
-Or install permanently by copying/symlinking the directory into `~/.pi/agent/extensions/`.
+This clones the repo under `~/.pi/agent/git/` and registers it in your settings - no
+manual clone needed. To try it once without installing: `pi -e git:github.com/erikus/pi-guardian`.
+
+For local development, clone the repo and run `pi -e ./index.ts` from the checkout
+(or symlink the checkout into `~/.pi/agent/extensions/`).
 
 - `/guardian` - show state and stats (reviews / allowed / denied / overridden / failures)
 - `/guardian off`, `/guardian on` - disable / re-enable (`on` also resets the circuit breaker)
@@ -47,12 +51,12 @@ falls back to the session's main model - the same fallback Codex uses when
 
 ## Policy
 
-The judging prompt is `prompts/policy_template.md` with `{{ tenant_policy_config }}`
+The judging prompt is `policy/policy_template.md` with `{{ tenant_policy_config }}`
 replaced by the first of:
 
 1. `<project>/.pi/guardian-policy.md`
 2. `~/.pi/agent/guardian-policy.md`
-3. bundled `prompts/policy.md` (Codex's default tenant policy)
+3. bundled `policy/policy.md` (Codex's default tenant policy)
 
 Both prompt files are copied verbatim from openai/codex (Apache-2.0); see the license
 note below. Notable defaults: credential exfiltration to untrusted destinations is
@@ -83,8 +87,9 @@ node --experimental-strip-types smoke-test.ts # static-gate + parser tests
 
 The extension code is MIT licensed (see `LICENSE`).
 
-`prompts/policy_template.md` and `prompts/policy.md` are copied from
+`policy/policy_template.md` and `policy/policy.md` are copied from
 [openai/codex](https://github.com/openai/codex) (`codex-rs/core/src/guardian/`),
-licensed under Apache-2.0 (see `prompts/LICENSE`). The extension code is a re-implementation of that design
+licensed under Apache-2.0 (see `policy/LICENSE`; `policy/NOTICE` reproduces the
+upstream attribution notice as Apache-2.0 requires). The extension code is a re-implementation of that design
 for pi's extension API; constants (timeout, retry count, breaker thresholds, transcript
 caps) mirror `codex-rs/core/src/guardian/mod.rs`.

@@ -101,14 +101,14 @@ interface GuardianStats {
 const extensionDir = new URL(".", import.meta.url).pathname;
 
 function loadPolicyTemplate(): string {
-	return readFileSync(join(extensionDir, "prompts", "policy_template.md"), "utf8");
+	return readFileSync(join(extensionDir, "policy", "policy_template.md"), "utf8");
 }
 
 function loadTenantPolicy(): string {
 	const projectPolicy = resolve(process.cwd(), PROJECT_POLICY_PATH);
 	if (existsSync(projectPolicy)) return readFileSync(projectPolicy, "utf8");
 	if (existsSync(USER_POLICY_PATH)) return readFileSync(USER_POLICY_PATH, "utf8");
-	return readFileSync(join(extensionDir, "prompts", "policy.md"), "utf8");
+	return readFileSync(join(extensionDir, "policy", "policy.md"), "utf8");
 }
 
 function truncate(text: string, maxChars: number): string {
