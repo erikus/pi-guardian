@@ -81,8 +81,10 @@ node --experimental-strip-types smoke-test.ts # static-gate + parser tests
 
 ## License / attribution
 
+The extension code is MIT licensed (see `LICENSE`).
+
 `prompts/policy_template.md` and `prompts/policy.md` are copied from
 [openai/codex](https://github.com/openai/codex) (`codex-rs/core/src/guardian/`),
-licensed under Apache-2.0. The extension code is a re-implementation of that design
+licensed under Apache-2.0 (see `prompts/LICENSE`). The extension code is a re-implementation of that design
 for pi's extension API; constants (timeout, retry count, breaker thresholds, transcript
 caps) mirror `codex-rs/core/src/guardian/mod.rs`.
