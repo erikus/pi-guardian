@@ -13,6 +13,9 @@ risky action against a written policy and allows or denies it automatically.
 pi install git:github.com/erikus/pi-guardian
 ```
 
+Requires pi >= 0.84 (the guardian calls `ctx.modelRegistry.complete`, added in
+0.84; on older pi it fails closed and blocks every gated action).
+
 This clones the repo under `~/.pi/agent/git/` and registers it in your settings - no
 manual clone needed. To try it once without installing: `pi -e git:github.com/erikus/pi-guardian`.
 
