@@ -34,8 +34,9 @@ For local development, clone the repo and run `pi -e ./index.ts` from the checko
    - `bash` commands made only of allowlisted read-only segments (`ls`, `cat`, `git status`,
      `grep`, …, no redirection/substitution) run freely.
 2. **Guardian review** for everything else: the extension builds a compact transcript
-   (capped, truncation-tagged, treated as *untrusted evidence*), renders the exact
-   planned action, and asks the reviewer model for a strict-JSON verdict
+   with user intent retained separately from recent assistant/tool evidence (capped,
+   truncation-tagged, and treated according to the policy's trust rules), renders the
+   exact planned action, and asks the reviewer model for a strict-JSON verdict
    `{risk_level, user_authorization, outcome, rationale}` per the policy prompt.
 3. **Deny** blocks the tool call with instructions to the agent not to work around the
    denial (mirroring Codex). In the TUI you get an "Allow anyway?" override prompt - a manual approval is final, like Codex's post-denial user approval.
@@ -73,7 +74,9 @@ actions are denied; and high-risk actions need at least `medium` user authorizat
   an `rm -rf` target) before deciding; this prototype judges from the transcript alone
   and the output contract tells it to lean conservative when facts are unverifiable.
 - **Single-completion review**, no prewarmed review session.
-- **Char-based caps** (~4 chars/token) instead of Codex's tokenizer-based transcript caps.
+- **Char-based caps** (~4 chars/token) instead of Codex's tokenizer-based transcript caps;
+  like Codex, message and tool evidence have separate budgets and the first/newest user
+  messages are retained before recent non-user evidence.
 - The static safe-command check is a much smaller allowlist than Codex's
   `is_safe_command` parser - anything it can't prove safe just goes to review, so
   being conservative here only costs latency, not safety.

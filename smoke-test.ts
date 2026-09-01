@@ -1,6 +1,6 @@
 /** Quick smoke test: node --experimental-strip-types smoke-test.ts */
 import assert from "node:assert/strict";
-import { isSafeBashCommand, parseVerdict, passesStaticGates } from "./index.ts";
+import { buildTranscript, isSafeBashCommand, parseVerdict, passesStaticGates } from "./index.ts";
 
 // Safe commands pass the static gate.
 assert.equal(isSafeBashCommand("ls -la"), true);
@@ -36,5 +36,47 @@ assert.equal(
 );
 assert.equal(parseVerdict('{"outcome":"maybe"}'), undefined);
 assert.equal(parseVerdict("I think this is fine."), undefined);
+
+// Transcript retention anchors original user intent even after heavy non-user traffic.
+{
+	const messages = [
+		{ role: "user", content: [{ type: "text", text: "original authorization" }] },
+		...Array.from({ length: 45 }, (_, i) => ({
+			role: "assistant",
+			content: [{ type: "text", text: `assistant message ${i}` }],
+		})),
+		{ role: "user", content: [{ type: "text", text: "latest user instruction" }] },
+	];
+	const transcript = buildTranscript({
+		sessionManager: {
+			getBranch: () => messages.map((message) => ({ type: "message", message })),
+		},
+	} as never);
+	assert.match(transcript, /original authorization/);
+	assert.match(transcript, /latest user instruction/);
+	assert.match(transcript, /assistant message 44/);
+	assert.doesNotMatch(transcript, /assistant message 0(?:\D|$)/);
+	assert.match(transcript, /omitted_transcript_entries="5"/);
+}
+
+// Tool evidence has its own budget and cannot crowd out user authorization.
+{
+	const huge = "x".repeat(5_000);
+	const messages = [
+		{ role: "user", content: [{ type: "text", text: "keep this authorization" }] },
+		...Array.from({ length: 12 }, () => ({
+			role: "toolResult",
+			toolName: "bash",
+			content: [{ type: "text", text: huge }],
+		})),
+	];
+	const transcript = buildTranscript({
+		sessionManager: {
+			getBranch: () => messages.map((message) => ({ type: "message", message })),
+		},
+	} as never);
+	assert.match(transcript, /keep this authorization/);
+	assert.match(transcript, /omitted_transcript_entries=/);
+}
 
 console.log("all smoke tests passed");

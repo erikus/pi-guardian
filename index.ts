@@ -37,10 +37,11 @@ const MAX_CONSECUTIVE_DENIALS_PER_TURN = 3;
 const DENIAL_WINDOW_SIZE = 50;
 const MAX_WINDOW_DENIALS = 10;
 
-const MAX_TRANSCRIPT_ENTRIES = 40;
-const MAX_CHARS_PER_MESSAGE = 8_000;
+const MAX_RECENT_NON_USER_ENTRIES = 40;
+const MAX_MESSAGE_TRANSCRIPT_CHARS = 80_000;
+const MAX_TOOL_TRANSCRIPT_CHARS = 40_000;
+const MAX_CHARS_PER_MESSAGE = 20_000;
 const MAX_CHARS_PER_TOOL_ENTRY = 4_000;
-const MAX_TRANSCRIPT_CHARS = 80_000;
 const MAX_ACTION_CHARS = 64_000;
 
 const READ_ONLY_TOOLS = new Set(["read", "grep", "find", "ls"]);
@@ -131,14 +132,17 @@ function contentBlocks(content: unknown): SessionContentBlock[] {
 	return content.filter((b): b is SessionContentBlock => !!b && typeof b === "object");
 }
 
-/** Compact transcript: most recent entries, per-entry and total char caps. */
-function buildTranscript(ctx: ExtensionContext): string {
-	const entries = ctx.sessionManager
-		.getBranch()
-		.filter((e: { type: string }) => e.type === "message")
-		.slice(-MAX_TRANSCRIPT_ENTRIES);
+type TranscriptEntryKind = "user" | "assistant" | "tool";
 
-	const sections: string[] = [];
+interface TranscriptEntry {
+	kind: TranscriptEntryKind;
+	text: string;
+}
+
+function collectTranscriptEntries(ctx: ExtensionContext): TranscriptEntry[] {
+	const sections: TranscriptEntry[] = [];
+	const entries = ctx.sessionManager.getBranch().filter((e: { type: string }) => e.type === "message");
+
 	for (const entry of entries as Array<{
 		message?: { role?: string; toolName?: string; content?: unknown; isError?: boolean };
 	}>) {
@@ -154,13 +158,16 @@ function buildTranscript(ctx: ExtensionContext): string {
 				.trim();
 			if (text) {
 				const label = message.role === "user" ? "User" : "Assistant";
-				sections.push(`${label}: ${truncate(text, MAX_CHARS_PER_MESSAGE)}`);
+				sections.push({ kind: message.role, text: `${label}: ${truncate(text, MAX_CHARS_PER_MESSAGE)}` });
 			}
 			if (message.role === "assistant") {
 				for (const b of blocks) {
 					if (b.type === "toolCall" && typeof b.name === "string") {
 						const args = JSON.stringify(b.arguments ?? {});
-						sections.push(`Assistant called tool ${b.name} with ${truncate(args, MAX_CHARS_PER_TOOL_ENTRY)}`);
+						sections.push({
+							kind: "tool",
+							text: `Assistant called tool ${b.name} with ${truncate(args, MAX_CHARS_PER_TOOL_ENTRY)}`,
+						});
 					}
 				}
 			}
@@ -171,17 +178,70 @@ function buildTranscript(ctx: ExtensionContext): string {
 				.join("\n")
 				.trim();
 			const errorTag = message.isError ? " (error)" : "";
-			sections.push(
-				`Tool result${errorTag} from ${message.toolName ?? "unknown"}: ${truncate(text, MAX_CHARS_PER_TOOL_ENTRY)}`,
-			);
+			sections.push({
+				kind: "tool",
+				text: `Tool result${errorTag} from ${message.toolName ?? "unknown"}: ${truncate(text, MAX_CHARS_PER_TOOL_ENTRY)}`,
+			});
+		}
+	}
+	return sections;
+}
+
+/**
+ * Compact transcript with separate message/tool budgets. User messages are
+ * selected first so tool traffic cannot evict authorization evidence. If they
+ * do not all fit, keep the first user message as an intent anchor and fill the
+ * remaining budget with the newest user messages.
+ */
+export function buildTranscript(ctx: ExtensionContext): string {
+	const entries = collectTranscriptEntries(ctx);
+	if (entries.length === 0) return "<no retained transcript entries>";
+
+	const included = new Set<number>();
+	const userIndices = entries
+		.map((entry, index) => (entry.kind === "user" ? index : -1))
+		.filter((index) => index >= 0);
+	const allUserChars = userIndices.reduce((total, index) => total + entries[index]!.text.length, 0);
+	let messageChars = 0;
+
+	if (allUserChars <= MAX_MESSAGE_TRANSCRIPT_CHARS) {
+		for (const index of userIndices) included.add(index);
+		messageChars = allUserChars;
+	} else if (userIndices.length > 0) {
+		const first = userIndices[0]!;
+		included.add(first);
+		messageChars = entries[first]!.text.length;
+		for (let i = userIndices.length - 1; i > 0; i--) {
+			const index = userIndices[i]!;
+			const chars = entries[index]!.text.length;
+			if (messageChars + chars <= MAX_MESSAGE_TRANSCRIPT_CHARS) {
+				included.add(index);
+				messageChars += chars;
+			}
 		}
 	}
 
-	let transcript = sections.join("\n\n");
-	if (transcript.length > MAX_TRANSCRIPT_CHARS) {
-		transcript = `<guardian_truncated dropped_leading_chars="${transcript.length - MAX_TRANSCRIPT_CHARS}"/>\n${transcript.slice(-MAX_TRANSCRIPT_CHARS)}`;
+	let toolChars = 0;
+	let retainedNonUserEntries = 0;
+	for (let index = entries.length - 1; index >= 0; index--) {
+		const entry = entries[index]!;
+		if (entry.kind === "user" || retainedNonUserEntries >= MAX_RECENT_NON_USER_ENTRIES) continue;
+		const chars = entry.text.length;
+		if (entry.kind === "tool") {
+			if (toolChars + chars > MAX_TOOL_TRANSCRIPT_CHARS) continue;
+			toolChars += chars;
+		} else {
+			if (messageChars + chars > MAX_MESSAGE_TRANSCRIPT_CHARS) continue;
+			messageChars += chars;
+		}
+		included.add(index);
+		retainedNonUserEntries += 1;
 	}
-	return transcript;
+
+	const selected = entries.filter((_entry, index) => included.has(index)).map((entry) => entry.text);
+	const omitted = entries.length - selected.length;
+	if (omitted > 0) selected.push(`<guardian_truncated omitted_transcript_entries="${omitted}"/>`);
+	return selected.join("\n\n");
 }
 
 function buildReviewPrompt(ctx: ExtensionContext, toolName: string, input: unknown): string {
