@@ -1,6 +1,12 @@
 /** Quick smoke test: node --experimental-strip-types smoke-test.ts */
 import assert from "node:assert/strict";
-import { buildTranscript, isSafeBashCommand, parseVerdict, passesStaticGates } from "./index.ts";
+import {
+	buildTranscript,
+	formatPlannedAction,
+	isSafeBashCommand,
+	parseVerdict,
+	passesStaticGates,
+} from "./index.ts";
 
 // Safe commands pass the static gate.
 assert.equal(isSafeBashCommand("ls -la"), true);
@@ -36,6 +42,22 @@ assert.equal(
 );
 assert.equal(parseVerdict('{"outcome":"maybe"}'), undefined);
 assert.equal(parseVerdict("I think this is fine."), undefined);
+
+// Planned actions remain valid structured JSON, and oversized executable fields are flagged.
+{
+	const formatted = formatPlannedAction("bash", { command: "echo ok", timeout: 1000 });
+	assert.equal(formatted.complete, true);
+	assert.deepEqual(JSON.parse(formatted.text), {
+		input: { command: "echo ok", timeout: 1000 },
+		tool: "bash",
+		working_directory: process.cwd(),
+	});
+
+	const oversized = formatPlannedAction("bash", { command: `${"x".repeat(64_001)}; rm -rf /` });
+	assert.equal(oversized.complete, false);
+	assert.deepEqual(oversized.truncatedFields, ["input.command", "<formatted action>"]);
+	assert.doesNotThrow(() => JSON.parse(oversized.text));
+}
 
 // Transcript retention anchors original user intent even after heavy non-user traffic.
 {

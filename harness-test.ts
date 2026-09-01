@@ -90,6 +90,19 @@ function makeHarness(completeImpl: () => Promise<string>) {
 	assert.ok(result?.block, "unparseable verdict must block");
 }
 
+// Oversized executable input is never shortened for review and then run in full.
+{
+	let calls = 0;
+	const h = makeHarness(async () => {
+		calls++;
+		return '{"outcome":"allow"}';
+	});
+	const result = await h.review({ command: `${"x".repeat(64_001)}; rm -rf /` });
+	assert.ok(result?.block, "oversized action must block");
+	assert.match(result.reason ?? "", /refusing to review a shortened action/);
+	assert.equal(calls, 0, "oversized action must not reach the reviewer model");
+}
+
 // Circuit breaker: 3 consecutive denials trip it; later reviews skip the model.
 {
 	let calls = 0;

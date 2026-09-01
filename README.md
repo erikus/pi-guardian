@@ -40,8 +40,10 @@ For local development, clone the repo and run `pi -e ./index.ts` from the checko
    `{risk_level, user_authorization, outcome, rationale}` per the policy prompt.
 3. **Deny** blocks the tool call with instructions to the agent not to work around the
    denial (mirroring Codex). In the TUI you get an "Allow anyway?" override prompt - a manual approval is final, like Codex's post-denial user approval.
-4. **Fail closed**: timeout (90s), unparseable verdict, or no authenticated model never
-   silently allows - with a UI you're prompted; headless, the action is blocked.
+4. **Fail closed**: timeout (90s), unparseable verdict, oversized action, or no
+   authenticated model never silently allows - with a UI you're prompted; headless,
+   the action is blocked. Oversized executable fields are never shortened for model
+   review and then run in full.
 5. **Circuit breaker**: 3 consecutive denials in a turn or 10 denials in the last 50
    reviews pauses auto-review; gated actions fall back to manual prompts
    (the same shape as Claude Code's auto-mode breaker).

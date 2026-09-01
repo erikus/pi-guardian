@@ -42,7 +42,8 @@ const MAX_MESSAGE_TRANSCRIPT_CHARS = 80_000;
 const MAX_TOOL_TRANSCRIPT_CHARS = 40_000;
 const MAX_CHARS_PER_MESSAGE = 20_000;
 const MAX_CHARS_PER_TOOL_ENTRY = 4_000;
-const MAX_ACTION_CHARS = 64_000;
+const MAX_ACTION_STRING_CHARS = 64_000;
+const MAX_FORMATTED_ACTION_CHARS = 64_000;
 
 const READ_ONLY_TOOLS = new Set(["read", "grep", "find", "ls"]);
 const WORKSPACE_WRITE_TOOLS = new Set(["write", "edit"]);
@@ -244,19 +245,72 @@ export function buildTranscript(ctx: ExtensionContext): string {
 	return selected.join("\n\n");
 }
 
-function buildReviewPrompt(ctx: ExtensionContext, toolName: string, input: unknown): string {
-	const template = loadPolicyTemplate().replace("{{ tenant_policy_config }}", loadTenantPolicy().trim());
-	const action = truncate(
-		`Tool: ${toolName}\nWorking directory: ${process.cwd()}\nInput: ${JSON.stringify(input, null, 2)}`,
-		MAX_ACTION_CHARS,
+export interface FormattedPlannedAction {
+	text: string;
+	complete: boolean;
+	truncatedFields: string[];
+}
+
+function truncateActionValue(
+	value: unknown,
+	path: string,
+	truncatedFields: string[],
+	ancestors: WeakSet<object>,
+): unknown {
+	if (typeof value === "string") {
+		if (value.length <= MAX_ACTION_STRING_CHARS) return value;
+		truncatedFields.push(path);
+		return truncate(value, MAX_ACTION_STRING_CHARS);
+	}
+	if (!value || typeof value !== "object") return value;
+	if (ancestors.has(value)) throw new TypeError(`planned action contains a circular value at ${path}`);
+	ancestors.add(value);
+	try {
+		if (Array.isArray(value)) {
+			return value.map((item, index) => truncateActionValue(item, `${path}[${index}]`, truncatedFields, ancestors));
+		}
+		return Object.fromEntries(
+			Object.entries(value as Record<string, unknown>)
+				.sort(([left], [right]) => left.localeCompare(right))
+				.map(([key, item]) => [
+					key,
+					truncateActionValue(item, path ? `${path}.${key}` : key, truncatedFields, ancestors),
+				]),
+		);
+	} finally {
+		ancestors.delete(value);
+	}
+}
+
+/** Format an action as valid JSON and report whether every executable byte is represented. */
+export function formatPlannedAction(toolName: string, input: unknown): FormattedPlannedAction {
+	const truncatedFields: string[] = [];
+	const value = truncateActionValue(
+		{ input, tool: toolName, working_directory: process.cwd() },
+		"",
+		truncatedFields,
+		new WeakSet(),
 	);
+	const text = JSON.stringify(value, null, 2);
+	if (text.length > MAX_FORMATTED_ACTION_CHARS) truncatedFields.push("<formatted action>");
+	return { text, complete: truncatedFields.length === 0, truncatedFields };
+}
+
+function buildReviewPrompt(ctx: ExtensionContext, toolName: string, input: unknown): string {
+	const action = formatPlannedAction(toolName, input);
+	if (!action.complete) {
+		throw new Error(
+			`planned action exceeds the safe review limit (${action.truncatedFields.slice(0, 5).join(", ")}); refusing to review a shortened action`,
+		);
+	}
+	const template = loadPolicyTemplate().replace("{{ tenant_policy_config }}", loadTenantPolicy().trim());
 	return [
 		template.trim(),
 		OUTPUT_CONTRACT.trim(),
 		"# Transcript (untrusted evidence)",
 		`<transcript>\n${buildTranscript(ctx)}\n</transcript>`,
 		"# Planned Action (untrusted evidence)",
-		`<planned_action>\n${action}\n</planned_action>`,
+		`<planned_action>\n${action.text}\n</planned_action>`,
 	].join("\n\n");
 }
 
