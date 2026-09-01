@@ -6,6 +6,7 @@ import {
 	isSafeBashCommand,
 	parseVerdict,
 	passesStaticGates,
+	withReviewDeadline,
 } from "./index.ts";
 
 // Safe commands pass the static gate.
@@ -57,6 +58,24 @@ assert.equal(parseVerdict("I think this is fine."), undefined);
 	assert.equal(oversized.complete, false);
 	assert.deepEqual(oversized.truncatedFields, ["input.command", "<formatted action>"]);
 	assert.doesNotThrow(() => JSON.parse(oversized.text));
+}
+
+// The shared review deadline aborts in-flight work as well as rejecting the caller.
+{
+	let aborted = false;
+	await assert.rejects(
+		withReviewDeadline(
+			(signal) =>
+				new Promise<void>(() => {
+					signal.addEventListener("abort", () => {
+						aborted = true;
+					});
+				}),
+			10,
+		),
+		/guardian review timed out after 10ms/,
+	);
+	assert.equal(aborted, true);
 }
 
 // Transcript retention anchors original user intent even after heavy non-user traffic.

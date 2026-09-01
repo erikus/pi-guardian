@@ -73,21 +73,45 @@ function makeHarness(completeImpl: () => Promise<string>) {
 	assert.match(result.reason ?? "", /Do not attempt to work around/);
 }
 
-// Model failure -> fail closed (headless: block).
+// Permanent model failure -> fail closed without retrying.
 {
+	let calls = 0;
 	const h = makeHarness(async () => {
-		throw new Error("boom");
+		calls++;
+		throw new Error("invalid API key");
 	});
 	const result = await h.review();
 	assert.ok(result?.block, "failure must block");
 	assert.match(result.reason ?? "", /fail closed/);
+	assert.equal(calls, 1, "permanent failures must not retry");
 }
 
-// Unparseable verdict -> fail closed.
+// Unparseable verdict -> retry, then fail closed.
 {
-	const h = makeHarness(async () => "sure, go ahead!");
+	let calls = 0;
+	const h = makeHarness(async () => {
+		calls++;
+		return "sure, go ahead!";
+	});
 	const result = await h.review();
 	assert.ok(result?.block, "unparseable verdict must block");
+	assert.equal(calls, 3, "parse failures should use the three-attempt budget");
+}
+
+// Transient service failure -> retry with backoff.
+{
+	let calls = 0;
+	const h = makeHarness(async () => {
+		calls++;
+		if (calls === 1) {
+			const error = new Error("service unavailable") as Error & { status: number };
+			error.status = 503;
+			throw error;
+		}
+		return '{"outcome":"allow"}';
+	});
+	assert.equal(await h.review(), undefined);
+	assert.equal(calls, 2, "transient failures should retry");
 }
 
 // Oversized executable input is never shortened for review and then run in full.

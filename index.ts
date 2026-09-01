@@ -374,20 +374,127 @@ export function parseVerdict(text: string): GuardianAssessment | undefined {
 	return undefined;
 }
 
-function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
+class GuardianReviewTimeoutError extends Error {
+	constructor(ms: number) {
+		super(`guardian review timed out after ${ms}ms`);
+		this.name = "GuardianReviewTimeoutError";
+	}
+}
+
+class GuardianReviewCancelledError extends Error {
+	constructor() {
+		super("guardian review cancelled");
+		this.name = "GuardianReviewCancelledError";
+	}
+}
+
+class GuardianVerdictParseError extends Error {
+	constructor(text: string) {
+		super(`unparseable guardian verdict: ${text.slice(0, 200)}`);
+		this.name = "GuardianVerdictParseError";
+	}
+}
+
+/** Run an operation under one abortable deadline, including any retries/backoff. */
+export function withReviewDeadline<T>(
+	operation: (signal: AbortSignal) => Promise<T>,
+	ms: number,
+	parentSignal?: AbortSignal,
+): Promise<T> {
 	return new Promise<T>((resolvePromise, rejectPromise) => {
-		const timer = setTimeout(() => rejectPromise(new Error(`guardian review timed out after ${ms}ms`)), ms);
-		promise.then(
-			(value) => {
-				clearTimeout(timer);
-				resolvePromise(value);
-			},
-			(error) => {
-				clearTimeout(timer);
-				rejectPromise(error);
-			},
-		);
+		const controller = new AbortController();
+		let settled = false;
+		const cleanup = () => {
+			clearTimeout(timer);
+			parentSignal?.removeEventListener("abort", onParentAbort);
+		};
+		const resolveOnce = (value: T) => {
+			if (settled) return;
+			settled = true;
+			cleanup();
+			resolvePromise(value);
+		};
+		const rejectOnce = (error: unknown) => {
+			if (settled) return;
+			settled = true;
+			cleanup();
+			controller.abort(error);
+			rejectPromise(error);
+		};
+		const onParentAbort = () => rejectOnce(new GuardianReviewCancelledError());
+		const timer = setTimeout(() => rejectOnce(new GuardianReviewTimeoutError(ms)), ms);
+		parentSignal?.addEventListener("abort", onParentAbort, { once: true });
+		if (parentSignal?.aborted) {
+			onParentAbort();
+			return;
+		}
+
+		try {
+			operation(controller.signal).then(resolveOnce, rejectOnce);
+		} catch (error) {
+			rejectOnce(error);
+		}
 	});
+}
+
+function guardianRetryDelayMs(attempt: number): number {
+	const base = 200 * 2 ** Math.max(0, attempt - 1);
+	return Math.round(base * (0.9 + Math.random() * 0.2));
+}
+
+function abortableSleep(ms: number, signal: AbortSignal): Promise<void> {
+	return new Promise((resolvePromise, rejectPromise) => {
+		if (signal.aborted) {
+			rejectPromise(signal.reason ?? new GuardianReviewCancelledError());
+			return;
+		}
+		const onAbort = () => {
+			clearTimeout(timer);
+			rejectPromise(signal.reason ?? new GuardianReviewCancelledError());
+		};
+		const timer = setTimeout(() => {
+			signal.removeEventListener("abort", onAbort);
+			resolvePromise();
+		}, ms);
+		signal.addEventListener("abort", onAbort, { once: true });
+	});
+}
+
+function guardianErrorStatus(error: unknown): number | undefined {
+	if (!error || typeof error !== "object") return undefined;
+	const candidate = error as {
+		status?: unknown;
+		statusCode?: unknown;
+		$metadata?: { httpStatusCode?: unknown };
+		$response?: { statusCode?: unknown };
+	};
+	for (const status of [
+		candidate.status,
+		candidate.statusCode,
+		candidate.$metadata?.httpStatusCode,
+		candidate.$response?.statusCode,
+	]) {
+		if (typeof status === "number") return status;
+	}
+	return undefined;
+}
+
+function isRetryableGuardianError(error: unknown): boolean {
+	if (error instanceof GuardianVerdictParseError) return true;
+	if (error instanceof GuardianReviewTimeoutError || error instanceof GuardianReviewCancelledError) return false;
+	const status = guardianErrorStatus(error);
+	if (status !== undefined) return status === 408 || status === 409 || status === 429 || status >= 500;
+	if (!(error instanceof Error)) return false;
+	const code = (error as Error & { code?: unknown }).code;
+	if (
+		typeof code === "string" &&
+		new Set(["ECONNRESET", "ECONNREFUSED", "ETIMEDOUT", "EAI_AGAIN", "ENETDOWN", "ENETUNREACH", "EPIPE"]).has(code)
+	) {
+		return true;
+	}
+	return /(?:\b(?:408|409|429|5\d\d)\b|server overloaded|rate.?limit|service unavailable|fetch failed|connection (?:failed|reset|refused)|response stream (?:disconnected|connection failed))/i.test(
+		error.message,
+	);
 }
 
 export default function guardianExtension(pi: ExtensionAPI) {
@@ -447,25 +554,44 @@ export default function guardianExtension(pi: ExtensionAPI) {
 			},
 		];
 
-		let lastError: unknown;
-		for (let attempt = 1; attempt <= GUARDIAN_MAX_ATTEMPTS; attempt++) {
-			try {
-				const response = await withTimeout(
-					ctx.modelRegistry.complete(model, { messages }, { effort: "low", sessionId: guardianSessionId }),
-					GUARDIAN_REVIEW_TIMEOUT_MS,
-				);
-				const text = response.content
-					.filter((c): c is { type: "text"; text: string } => c.type === "text")
-					.map((c) => c.text)
-					.join("\n");
-				const verdict = parseVerdict(text);
-				if (verdict) return verdict;
-				lastError = new Error(`unparseable guardian verdict: ${text.slice(0, 200)}`);
-			} catch (error) {
-				lastError = error;
-			}
-		}
-		throw lastError instanceof Error ? lastError : new Error(String(lastError));
+		return await withReviewDeadline(
+			async (signal) => {
+				let lastError: unknown;
+				for (let attempt = 1; attempt <= GUARDIAN_MAX_ATTEMPTS; attempt++) {
+					try {
+						const response = await ctx.modelRegistry.complete(
+							model,
+							{ messages },
+							{
+								effort: "low",
+								sessionId: guardianSessionId,
+								signal,
+								maxRetries: 0,
+								timeoutMs: GUARDIAN_REVIEW_TIMEOUT_MS,
+							},
+						);
+						if (response.stopReason === "aborted") throw new GuardianReviewCancelledError();
+						if (response.stopReason === "error") {
+							throw new Error(response.errorMessage ?? "guardian model request failed");
+						}
+						const text = response.content
+							.filter((c): c is { type: "text"; text: string } => c.type === "text")
+							.map((c) => c.text)
+							.join("\n");
+						const verdict = parseVerdict(text);
+						if (verdict) return verdict;
+						throw new GuardianVerdictParseError(text);
+					} catch (error) {
+						lastError = error;
+						if (attempt >= GUARDIAN_MAX_ATTEMPTS || !isRetryableGuardianError(error)) break;
+						await abortableSleep(guardianRetryDelayMs(attempt), signal);
+					}
+				}
+				throw lastError instanceof Error ? lastError : new Error(String(lastError));
+			},
+			GUARDIAN_REVIEW_TIMEOUT_MS,
+			ctx.signal,
+		);
 	}
 
 	/** Manual fallback: prompt the user when the guardian can't decide. */
