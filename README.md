@@ -62,9 +62,10 @@ replaced by the first of:
 3. bundled `policy/policy.md` (Codex's default tenant policy)
 
 Both prompt files are copied verbatim from openai/codex (Apache-2.0); see the license
-note below. Notable defaults: credential exfiltration to untrusted destinations is
-denied even with explicit user approval; a user-requested `rm -rf` of a narrow target
-is low risk; high-risk actions need at least `medium` user authorization.
+note below. The extension appends a pi-specific environment override because pi has no
+operating-system sandbox and the reviewer has no investigation tools. Notable defaults:
+sensitive egress must be authorized for the specific payload and destination; critical
+actions are denied; and high-risk actions need at least `medium` user authorization.
 
 ## Differences from Codex's guardian (prototype limitations)
 
